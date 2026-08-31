@@ -20,11 +20,23 @@ export function NameSetup({ user }: { user: User }) {
     }
     setBusy(true);
     setError(null);
-    const { error: updateError } = await supabase.auth.updateUser({
+    const { error: metaError } = await supabase.auth.updateUser({
       data: { full_name: fullName },
     });
+    const { error: profileError } = await supabase
+      .from("profiles")
+      .update({ full_name: fullName })
+      .eq("id", user.id);
     setBusy(false);
-    if (updateError) setError(updateError.message);
+    if (metaError) {
+      setError(metaError.message);
+      return;
+    }
+    if (profileError) {
+      setError(profileError.message);
+      return;
+    }
+    window.dispatchEvent(new Event("profile-updated"));
   }
 
   return (
@@ -33,8 +45,7 @@ export function NameSetup({ user }: { user: User }) {
         <p className="eyebrow">Almost there</p>
         <h1>What’s your name?</h1>
         <p className="lede">
-          This name is stored on your account and used on every expense you add.
-          Signed in as {user.email}.
+          This name is stored on records you add or edit. Signed in as {user.email}.
         </p>
         <form onSubmit={onSubmit} className="stack">
           <label>
@@ -44,7 +55,7 @@ export function NameSetup({ user }: { user: User }) {
               autoComplete="name"
               required
               minLength={2}
-              placeholder="e.g. Hitesh"
+              placeholder="e.g. Nirav"
               value={name}
               onChange={(e) => setName(e.target.value)}
             />

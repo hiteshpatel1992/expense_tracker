@@ -3,14 +3,12 @@
 import { useState, type FormEvent } from "react";
 import { getSupabase } from "@/lib/supabase";
 
-type Mode = "signin" | "signup" | "forgot";
+type Mode = "signin" | "forgot";
 
 export function AuthScreen() {
   const [mode, setMode] = useState<Mode>("signin");
-  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -36,31 +34,6 @@ export function AuthScreen() {
         return;
       }
 
-      if (mode === "signup") {
-        const fullName = name.trim();
-        if (fullName.length < 2) {
-          throw new Error("Enter your name.");
-        }
-        if (password.length < 6) {
-          throw new Error("Password must be at least 6 characters.");
-        }
-        if (password !== confirm) {
-          throw new Error("Passwords do not match.");
-        }
-        const { data, error: signUpError } = await supabase.auth.signUp({
-          email: email.trim(),
-          password,
-          options: { data: { full_name: fullName } },
-        });
-        if (signUpError) throw signUpError;
-        if (!data.session) {
-          setMessage(
-            "Account created. If email confirmation is on, check your inbox before signing in.",
-          );
-        }
-        return;
-      }
-
       const { error: signInError } = await supabase.auth.signInWithPassword({
         email: email.trim(),
         password,
@@ -76,45 +49,14 @@ export function AuthScreen() {
   return (
     <main className="auth-wrap">
       <section className="auth-card">
-        <p className="eyebrow">Shared household ledger</p>
-        <h1>Expenses</h1>
+        <p className="eyebrow">Organization ledger</p>
+        <h1>P&amp;L tracker</h1>
         <p className="lede">
-          Create an account with your name, email, and password. Everyone who
-          signs in sees the same expenses.
+          Sign in with the account your admin created. New accounts cannot be
+          created from this screen.
         </p>
 
-        <div className="tabs" role="tablist">
-          <button
-            type="button"
-            className={mode === "signin" ? "tab active" : "tab"}
-            onClick={() => setMode("signin")}
-          >
-            Sign in
-          </button>
-          <button
-            type="button"
-            className={mode === "signup" ? "tab active" : "tab"}
-            onClick={() => setMode("signup")}
-          >
-            Create account
-          </button>
-        </div>
-
         <form onSubmit={onSubmit} className="stack">
-          {mode === "signup" && (
-            <label>
-              Your name
-              <input
-                type="text"
-                autoComplete="name"
-                required
-                minLength={2}
-                placeholder="e.g. Hitesh"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </label>
-          )}
           <label>
             Email
             <input
@@ -131,7 +73,7 @@ export function AuthScreen() {
               Password
               <input
                 type="password"
-                autoComplete={mode === "signup" ? "new-password" : "current-password"}
+                autoComplete="current-password"
                 required
                 minLength={6}
                 value={password}
@@ -140,31 +82,11 @@ export function AuthScreen() {
             </label>
           )}
 
-          {mode === "signup" && (
-            <label>
-              Confirm password
-              <input
-                type="password"
-                autoComplete="new-password"
-                required
-                minLength={6}
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-              />
-            </label>
-          )}
-
           {error && <p className="banner error">{error}</p>}
           {message && <p className="banner ok">{message}</p>}
 
           <button type="submit" className="btn primary" disabled={busy}>
-            {busy
-              ? "Please wait…"
-              : mode === "signup"
-                ? "Create account"
-                : mode === "forgot"
-                  ? "Send reset link"
-                  : "Sign in"}
+            {busy ? "Please wait…" : mode === "forgot" ? "Send reset link" : "Sign in"}
           </button>
         </form>
 

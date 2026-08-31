@@ -1,19 +1,24 @@
-# Shared household expense tracker
+# Organization P&L tracker
 
-Installable PWA on **Vercel (Hobby)** with **Supabase (Free)**. People create an account with email and password. After sign-in, **everyone sees the same expenses**.
+Installable PWA on **Vercel** with **Supabase**. Multiple companies, each with its own income/expense ledger, opening balance, and closing (bank) balance. Public sign-up is off; only an admin can add users.
 
 ## 1. Supabase
 
-1. Create a free project at [supabase.com](https://supabase.com).
-2. Open **SQL Editor**, paste [`supabase/schema.sql`](supabase/schema.sql), and run it.
-3. **Authentication → Providers → Email**: leave Email enabled.
-4. **Authentication → Providers → Email → Confirm email**: turn **off** so household members can sign up without clicking a mail link.
-5. **Authentication → URL configuration**
-   - Site URL: `http://localhost:3000` while developing, then your `https://….vercel.app` URL after deploy.
-   - Redirect URLs: both `http://localhost:3000/**` and `https://YOUR-APP.vercel.app/**`.
-6. **Project Settings → API**: copy **Project URL** and **anon public** key.
+1. Apply migrations (creates companies, entries, admin lock for `nirav@thefitway.io`):
 
-Never put the **service_role** key in this app.
+```bash
+npx supabase login
+npx supabase link --project-ref xxnwuiojemvkcjtapgst
+npx supabase db push --linked
+```
+
+2. **Authentication → Providers → Email**: leave Email on.
+3. **Authentication → Providers → Email**: turn **off** “Enable new user sign ups”.
+4. **Authentication → Users**: create `nirav@thefitway.io` (or confirm that user exists). The migration marks that user as the protected admin.
+5. **Project Settings → API**: copy **Project URL**, **anon public** key, and **service_role** key.
+6. **Authentication → URL configuration**: Site URL = your Vercel origin (and `http://localhost:3000` locally).
+
+Never put the **service_role** key in client code or git. Only `SUPABASE_SERVICE_ROLE_KEY` on the server / Vercel.
 
 ## 2. Local run
 
@@ -21,30 +26,27 @@ Never put the **service_role** key in this app.
 cp .env.example .env.local
 ```
 
-Fill in the two `NEXT_PUBLIC_SUPABASE_*` values, then:
+Fill in the three values, then:
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). Create an account, add an expense (date defaults to today), switch months, and export Excel.
+Sign in as the admin, add companies (set opening bank balance), add other users from **Users**.
 
-## 3. Deploy on Vercel (free)
+## 3. Deploy
 
-1. Push this repo to GitHub.
-2. Import the project in [Vercel](https://vercel.com).
-3. Add the same two environment variables.
-4. Deploy, then set the Supabase Site URL and redirect URLs to the Vercel origin.
-
-Share the Vercel URL. Anyone who creates an account can see and edit the shared list. On a phone, use **Add to Home Screen** so it opens like an app.
+Set the same three env vars on Vercel and redeploy. Then sign in, add companies, and enter income/expense.
 
 ## Features
 
-- Email + password sign up / sign in / sign out / forgot password
-- Shared board (not private per user)
-- Date, amount (INR), reason, paid by, category, notes
-- Date defaults to today
-- Monthly split and month picker
-- Export Excel (Expenses + Monthly split sheets)
-- Progressive Web App (standalone, install prompt / iOS hint)
+- Independent P&L per company, with multiple bank accounts
+- Consolidated company totals plus a summary for each bank account
+- Income and expense, each tagged to a bank account, with date (defaults to today), reason, category, notes
+- Shared categories you can add, rename, or delete from **Categories**
+- Closing balance = opening + income − expenses, per account and for the company
+- Who added a record, who last edited it, and when; full edit history
+- Only admins can add users and delete companies, bank accounts, and ledger rows
+- Excel export: Entries, Monthly split, Bank accounts, Balances
+- PWA (Add to Home Screen)

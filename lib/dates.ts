@@ -10,6 +10,10 @@ export function monthKeyFromDate(isoDate: string): string {
   return isoDate.slice(0, 7);
 }
 
+export function firstDayOfMonthISO(isoDate = todayISO()): string {
+  return `${isoDate.slice(0, 7)}-01`;
+}
+
 export function currentMonthKey(): string {
   return monthKeyFromDate(todayISO());
 }
@@ -28,5 +32,15 @@ export function formatDisplayDate(isoDate: string): string {
     day: "numeric",
     month: "short",
     year: "numeric",
+  });
+}
+
+export function formatDisplayDateTime(iso: string): string {
+  return new Date(iso).toLocaleString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
   });
 }

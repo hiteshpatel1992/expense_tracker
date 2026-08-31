@@ -1,59 +1,147 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import type { User } from "@supabase/supabase-js";
-import { ExpenseScreen } from "@/components/ExpenseScreen";
-import { InstallPrompt } from "@/components/Pwa";
-import { currentMonthKey, formatDisplayDate, monthLabel } from "@/lib/dates";
-import { downloadExpensesXlsx } from "@/lib/export-xlsx";
+import { AppHeader } from "@/components/AppHeader";
+import { BankAccountForm } from "@/components/BankAccountForm";
+import { EntryScreen } from "@/components/EntryScreen";
+import {
+  accountSummaries,
+  computeBalances,
+  openingFromAccounts,
+} from "@/lib/balances";
+import {
+  currentMonthKey,
+  formatDisplayDate,
+  formatDisplayDateTime,
+  monthLabel,
+} from "@/lib/dates";
+import { downloadLedgerXlsx } from "@/lib/export-xlsx";
 import { formatINR } from "@/lib/money";
-import { groupByMonth, sumAmount, totalsByKey } from "@/lib/monthly";
+import { groupByMonth } from "@/lib/monthly";
 import { getSupabase } from "@/lib/supabase";
-import { CATEGORIES, type Expense } from "@/lib/types";
-import { userName } from "@/lib/user";
+import type {
+  BankAccount,
+  Company,
+  Entry,
+  EntryEdit,
+  EntryType,
+  Profile,
+} from "@/lib/types";
+import { displayName, isAdmin } from "@/lib/user";
 
 type Filters = {
   q: string;
+  type: "" | EntryType;
   category: string;
-  paidBy: string;
   month: string | "all";
+  account: string | "all";
 };
 
-export function Tracker({ user }: { user: User }) {
-  const [expenses, setExpenses] = useState<Expense[]>([]);
+type SheetState = { mode: "new"; type: EntryType } | { mode: "edit"; entry: Entry };
+
+export function Tracker({
+  user,
+  profile,
+  companyId,
+  initialAccount = "all",
+}: {
+  user: User;
+  profile: Profile | null;
+  companyId: string;
+  initialAccount?: string;
+}) {
+  const admin = isAdmin(profile, user);
+  const [company, setCompany] = useState<Company | null>(null);
+  const [accounts, setAccounts] = useState<BankAccount[]>([]);
+  const [entries, setEntries] = useState<Entry[]>([]);
+  const [edits, setEdits] = useState<EntryEdit[]>([]);
+  const [profiles, setProfiles] = useState<Map<string, Profile>>(new Map());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [offline, setOffline] = useState(false);
-  const [sheet, setSheet] = useState<Expense | "new" | null>(null);
+  const [sheet, setSheet] = useState<SheetState | null>(null);
+  const [accountSheet, setAccountSheet] = useState<BankAccount | "new" | null>(null);
+  const [historyId, setHistoryId] = useState<string | null>(null);
   const [filters, setFilters] = useState<Filters>({
     q: "",
+    type: "",
     category: "",
-    paidBy: "",
     month: currentMonthKey(),
+    account: initialAccount === "all" ? "all" : initialAccount,
   });
-  const name = userName(user);
 
   const load = useCallback(async () => {
     const supabase = getSupabase();
     if (!supabase) return;
-    const { data, error: queryError } = await supabase
-      .from("expenses")
-      .select("*")
-      .order("date", { ascending: false })
-      .order("created_at", { ascending: false });
-
-    if (queryError) {
-      setError(queryError.message);
+    const [companyRes, accountRes, entryRes, profileRes] = await Promise.all([
+      supabase.from("companies").select("*").eq("id", companyId).single(),
+      supabase
+        .from("bank_accounts")
+        .select("*")
+        .eq("company_id", companyId)
+        .order("name"),
+      supabase
+        .from("entries")
+        .select("*")
+        .eq("company_id", companyId)
+        .is("deleted_at", null)
+        .order("date", { ascending: false })
+        .order("created_at", { ascending: false }),
+      supabase.from("profiles").select("id, email, full_name, role"),
+    ]);
+    if (companyRes.error) {
+      setError(companyRes.error.message);
       return;
     }
-
-    const rows = (data ?? []).map((row) => ({
+    if (accountRes.error) {
+      setError(accountRes.error.message);
+      return;
+    }
+    if (entryRes.error) {
+      setError(entryRes.error.message);
+      return;
+    }
+    const mapped = (entryRes.data ?? []).map((row) => ({
       ...row,
       amount: Number(row.amount),
-    })) as Expense[];
-    setExpenses(rows);
+    })) as Entry[];
+    setCompany({
+      ...companyRes.data,
+      opening_balance: Number(companyRes.data.opening_balance),
+    } as Company);
+    setAccounts(
+      (accountRes.data ?? []).map((row) => ({
+        ...row,
+        opening_balance: Number(row.opening_balance),
+      })) as BankAccount[],
+    );
+    setEntries(mapped);
+    setProfiles(
+      new Map((profileRes.data ?? []).map((row) => [row.id, row as Profile])),
+    );
+
+    if (mapped.length > 0) {
+      const { data: editRows } = await supabase
+        .from("entry_edits")
+        .select("*")
+        .in(
+          "entry_id",
+          mapped.map((row) => row.id),
+        )
+        .order("edited_at", { ascending: false });
+      setEdits(
+        (editRows ?? []).map((row) => ({
+          ...row,
+          prev_amount: row.prev_amount == null ? null : Number(row.prev_amount),
+        })) as EntryEdit[],
+      );
+    } else {
+      setEdits([]);
+    }
     setError(null);
-  }, []);
+  }, [companyId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,24 +151,6 @@ export function Tracker({ user }: { user: User }) {
     })();
     return () => {
       cancelled = true;
-    };
-  }, [load]);
-
-  useEffect(() => {
-    const supabase = getSupabase();
-    if (!supabase) return;
-    const channel = supabase
-      .channel("expenses-live")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "expenses" },
-        () => {
-          void load();
-        },
-      )
-      .subscribe();
-    return () => {
-      void supabase.removeChannel(channel);
     };
   }, [load]);
 
@@ -98,62 +168,132 @@ export function Tracker({ user }: { user: User }) {
   }, []);
 
   useEffect(() => {
-    document.body.classList.toggle("sheet-open", sheet !== null);
+    document.body.classList.toggle(
+      "sheet-open",
+      sheet !== null || accountSheet !== null,
+    );
     return () => document.body.classList.remove("sheet-open");
-  }, [sheet]);
+  }, [sheet, accountSheet]);
+
+  const scopedEntries = useMemo(() => {
+    if (filters.account === "all") return entries;
+    return entries.filter((entry) => entry.bank_account_id === filters.account);
+  }, [entries, filters.account]);
 
   const monthOptions = useMemo(() => {
-    const keys = new Set(expenses.map((e) => e.date.slice(0, 7)));
+    const keys = new Set(scopedEntries.map((e) => e.date.slice(0, 7)));
     keys.add(currentMonthKey());
     return [...keys].sort().reverse();
-  }, [expenses]);
-
-  const people = useMemo(() => {
-    return [...new Set(expenses.map((e) => e.paid_by))].sort((a, b) =>
-      a.localeCompare(b),
-    );
-  }, [expenses]);
+  }, [scopedEntries]);
 
   const filtered = useMemo(() => {
     const q = filters.q.trim().toLowerCase();
-    return expenses.filter((expense) => {
-      if (filters.month !== "all" && expense.date.slice(0, 7) !== filters.month) {
+    return entries.filter((entry) => {
+      if (filters.month !== "all" && entry.date.slice(0, 7) !== filters.month) {
         return false;
       }
-      if (filters.category && expense.category !== filters.category) return false;
-      if (filters.paidBy && expense.paid_by !== filters.paidBy) return false;
+      if (filters.account !== "all" && entry.bank_account_id !== filters.account) {
+        return false;
+      }
+      if (filters.type && entry.type !== filters.type) return false;
+      if (filters.category && entry.category !== filters.category) return false;
       if (q) {
-        const hay = `${expense.reason} ${expense.paid_by} ${expense.category} ${expense.notes ?? ""}`.toLowerCase();
+        const hay = `${entry.reason} ${entry.category} ${entry.notes ?? ""}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [expenses, filters]);
+  }, [entries, filters]);
 
-  const thisMonthKey = currentMonthKey();
-  const thisMonthTotal = useMemo(
-    () =>
-      sumAmount(expenses.filter((e) => e.date.slice(0, 7) === thisMonthKey)),
-    [expenses, thisMonthKey],
+  const opening = openingFromAccounts(accounts);
+  const allBalances = useMemo(
+    () => computeBalances(opening, entries),
+    [opening, entries],
   );
-  const filteredTotal = sumAmount(filtered);
-  const months = groupByMonth(expenses);
-  const categoryTotals = totalsByKey(filtered, "category");
-  const personTotals = totalsByKey(filtered, "paid_by");
+  const selectedAccount = accounts.find((account) => account.id === filters.account);
+  const viewOpening = selectedAccount?.opening_balance ?? opening;
+  const viewBalances = useMemo(
+    () => computeBalances(viewOpening, filtered),
+    [viewOpening, filtered],
+  );
+  const perAccount = useMemo(
+    () => accountSummaries(accounts, entries),
+    [accounts, entries],
+  );
+  const months = groupByMonth(scopedEntries);
   const selectedMonthSplit = months.find((m) => m.key === filters.month);
+  const categories = useMemo(
+    () => [...new Set(entries.map((e) => e.category))].sort(),
+    [entries],
+  );
+  const accountNames = useMemo(
+    () => new Map(accounts.map((account) => [account.id, account.name])),
+    [accounts],
+  );
 
-  async function signOut() {
-    await getSupabase()?.auth.signOut();
+  function startAdd(type: EntryType) {
+    if (accounts.length === 0) {
+      setAccountSheet("new");
+      return;
+    }
+    setSheet({ mode: "new", type });
   }
 
-  async function onDelete(id: string) {
-    if (!window.confirm("Delete this expense?")) return;
+  async function onDeleteAccount(account: BankAccount) {
+    if (!admin) return;
+    if (!window.confirm(`Delete bank account ${account.name}?`)) return;
     const supabase = getSupabase();
     if (!supabase) return;
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData.session?.access_token;
+    if (!token) {
+      setError("Sign in again, then try deleting the bank account.");
+      return;
+    }
+    const res = await fetch(`/api/bank-accounts?id=${encodeURIComponent(account.id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const body = (await res.json()) as { error?: string };
+    if (!res.ok) {
+      setError(body.error ?? "Could not delete the bank account.");
+      return;
+    }
+    if (filters.account === account.id) {
+      setFilters({ ...filters, account: "all" });
+    }
+    await load();
+  }
+
+  async function onDelete(entry: Entry) {
+    if (!admin) return;
+    if (!window.confirm("Remove this record from the ledger?")) return;
+    const supabase = getSupabase();
+    if (!supabase) return;
+    const { error: histError } = await supabase.from("entry_edits").insert({
+      entry_id: entry.id,
+      action: "delete",
+      edited_by: user.id,
+      prev_date: entry.date,
+      prev_type: entry.type,
+      prev_amount: entry.amount,
+      prev_reason: entry.reason,
+      prev_category: entry.category,
+      prev_notes: entry.notes,
+    });
+    if (histError) {
+      setError(histError.message);
+      return;
+    }
     const { error: deleteError } = await supabase
-      .from("expenses")
-      .delete()
-      .eq("id", id);
+      .from("entries")
+      .update({
+        deleted_at: new Date().toISOString(),
+        deleted_by: user.id,
+        updated_by: user.id,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", entry.id);
     if (deleteError) {
       setError(deleteError.message);
       return;
@@ -162,58 +302,199 @@ export function Tracker({ user }: { user: User }) {
   }
 
   async function onExport() {
-    await downloadExpensesXlsx(
+    if (!company) return;
+    await downloadLedgerXlsx(
+      company,
+      accounts,
       filtered,
       filters.month === "all" ? "all" : filters.month,
     );
   }
 
+  function entryActions(entry: Entry) {
+    return (
+      <div className="table-actions">
+        <button type="button" onClick={() => setSheet({ mode: "edit", entry })}>
+          Edit
+        </button>
+        {admin && (
+          <button type="button" onClick={() => onDelete(entry)}>
+            Delete
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => setHistoryId(historyId === entry.id ? null : entry.id)}
+        >
+          History
+        </button>
+      </div>
+    );
+  }
+
+  function historyBlock(entryId: string) {
+    const rows = edits.filter((row) => row.entry_id === entryId);
+    return (
+      <div className="history">
+        <h3>Edit history</h3>
+        {rows.length === 0 ? (
+          <p className="empty">No earlier versions.</p>
+        ) : (
+          <ul>
+            {rows.map((row) => (
+              <li key={row.id}>
+                {row.action} by {displayName(row.edited_by, profiles)} at{" "}
+                {formatDisplayDateTime(row.edited_at)} — was {row.prev_type}{" "}
+                {row.prev_reason}{" "}
+                {row.prev_amount != null ? formatINR(row.prev_amount) : ""}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  }
+
+  if (!loading && !company) {
+    return (
+      <div className="page">
+        <AppHeader user={user} profile={profile} />
+        <p className="banner error">{error ?? "Company not found."}</p>
+        <Link href="/">Back to companies</Link>
+      </div>
+    );
+  }
+
   return (
     <div className="page">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Shared household ledger</p>
-          <h1>Expenses</h1>
-        </div>
-        <div className="topbar-actions">
-          <InstallPrompt />
-          <span className="who">
-            <strong>{name}</strong>
-            <em>{user.email}</em>
-          </span>
-          <button type="button" className="btn ghost compact" onClick={signOut}>
-            Sign out
-          </button>
-        </div>
-      </header>
-
-      <p className="banner shared">
-        Shared board — everyone with an account sees the same expenses. New rows
-        are saved under your name.
+      <AppHeader user={user} profile={profile} title={company?.name ?? "Company"} />
+      <p>
+        <Link href="/">← All companies</Link>
       </p>
       {offline && (
         <p className="banner error">
-          You are offline — you can browse this screen, but saving needs internet.
+          You are offline — browsing works, saving needs internet.
         </p>
       )}
       {error && <p className="banner error">{error}</p>}
 
       <section className="summary">
         <article>
-          <span>All time</span>
-          <strong>{formatINR(sumAmount(expenses))}</strong>
+          <span>All accounts · Opening</span>
+          <strong>{formatINR(allBalances.opening)}</strong>
         </article>
         <article>
-          <span>This month</span>
-          <strong>{formatINR(thisMonthTotal)}</strong>
+          <span>All accounts · Income</span>
+          <strong>{formatINR(allBalances.income)}</strong>
         </article>
         <article>
-          <span>On screen</span>
-          <strong>{formatINR(filteredTotal)}</strong>
-          <em>
-            {filtered.length} expense{filtered.length === 1 ? "" : "s"}
-          </em>
+          <span>All accounts · Expense</span>
+          <strong>{formatINR(allBalances.expense)}</strong>
         </article>
+        <article>
+          <span>All accounts · Closing</span>
+          <strong>{formatINR(allBalances.closing)}</strong>
+          <em>Sum of every bank account</em>
+        </article>
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h2>Bank accounts</h2>
+          <button
+            type="button"
+            className="btn primary compact"
+            onClick={() => setAccountSheet("new")}
+          >
+            Add bank account
+          </button>
+        </div>
+        {accounts.length === 0 ? (
+          <div className="empty-block">
+            <p className="empty">
+              Add a bank account and its opening balance before income or expense.
+            </p>
+            <button type="button" className="btn primary" onClick={() => setAccountSheet("new")}>
+              Add bank account
+            </button>
+          </div>
+        ) : (
+          <div className="account-grid">
+            <button
+              type="button"
+              className={
+                filters.account === "all" ? "account-card active" : "account-card"
+              }
+              onClick={() => setFilters({ ...filters, account: "all" })}
+            >
+              <h3>All accounts</h3>
+              <p className="account-meta">Consolidated</p>
+              <dl className="account-stats">
+                <div>
+                  <dt>Opening</dt>
+                  <dd>{formatINR(allBalances.opening)}</dd>
+                </div>
+                <div>
+                  <dt>Income</dt>
+                  <dd>{formatINR(allBalances.income)}</dd>
+                </div>
+                <div>
+                  <dt>Expense</dt>
+                  <dd>{formatINR(allBalances.expense)}</dd>
+                </div>
+                <div>
+                  <dt>Closing</dt>
+                  <dd>{formatINR(allBalances.closing)}</dd>
+                </div>
+              </dl>
+            </button>
+            {perAccount.map(({ account, balances }) => (
+              <article
+                key={account.id}
+                className={
+                  filters.account === account.id ? "account-card active" : "account-card"
+                }
+              >
+                <button
+                  type="button"
+                  className="account-card-main"
+                  onClick={() => setFilters({ ...filters, account: account.id })}
+                >
+                  <h3>{account.name}</h3>
+                  {account.notes && <p className="account-meta">{account.notes}</p>}
+                  <dl className="account-stats">
+                    <div>
+                      <dt>Opening</dt>
+                      <dd>{formatINR(balances.opening)}</dd>
+                    </div>
+                    <div>
+                      <dt>Income</dt>
+                      <dd>{formatINR(balances.income)}</dd>
+                    </div>
+                    <div>
+                      <dt>Expense</dt>
+                      <dd>{formatINR(balances.expense)}</dd>
+                    </div>
+                    <div>
+                      <dt>Closing</dt>
+                      <dd>{formatINR(balances.closing)}</dd>
+                    </div>
+                  </dl>
+                </button>
+                <div className="table-actions">
+                  <button type="button" onClick={() => setAccountSheet(account)}>
+                    Edit
+                  </button>
+                  {admin && (
+                    <button type="button" onClick={() => onDeleteAccount(account)}>
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="panel">
@@ -230,8 +511,15 @@ export function Tracker({ user }: { user: User }) {
             </button>
             <button
               type="button"
-              className="btn primary compact"
-              onClick={() => setSheet("new")}
+              className="btn ghost compact hide-on-mobile"
+              onClick={() => startAdd("income")}
+            >
+              Add income
+            </button>
+            <button
+              type="button"
+              className="btn primary compact hide-on-mobile"
+              onClick={() => startAdd("expense")}
             >
               Add expense
             </button>
@@ -256,7 +544,7 @@ export function Tracker({ user }: { user: User }) {
           </label>
         </div>
         {months.length === 0 ? (
-          <p className="empty">No months yet — add the first expense.</p>
+          <p className="empty">No months yet — add income or expense.</p>
         ) : (
           <ul className="month-list">
             {months.map((month) => (
@@ -269,9 +557,9 @@ export function Tracker({ user }: { user: User }) {
                   onClick={() => setFilters({ ...filters, month: month.key })}
                 >
                   <span>{month.label}</span>
-                  <strong>{formatINR(month.total)}</strong>
+                  <strong>{formatINR(month.net)}</strong>
                   <em>
-                    {month.count} item{month.count === 1 ? "" : "s"}
+                    In {formatINR(month.income)} · Out {formatINR(month.expense)}
                   </em>
                 </button>
               </li>
@@ -281,7 +569,7 @@ export function Tracker({ user }: { user: User }) {
         {selectedMonthSplit && (
           <div className="mini-cats">
             {Object.entries(selectedMonthSplit.byCategory)
-              .sort((a, b) => b[1] - a[1])
+              .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
               .map(([category, total]) => (
                 <span key={category}>
                   {category} {formatINR(total)}
@@ -289,6 +577,14 @@ export function Tracker({ user }: { user: User }) {
               ))}
           </div>
         )}
+        <p className="sheet-who">
+          This view: {formatINR(viewBalances.income)} in,{" "}
+          {formatINR(viewBalances.expense)} out. Closing uses
+          {selectedAccount
+            ? ` ${selectedAccount.name} opening (${formatINR(viewOpening)})`
+            : ` all account openings (${formatINR(allBalances.opening)})`}
+          .
+        </p>
       </section>
 
       <section className="panel">
@@ -298,10 +594,42 @@ export function Tracker({ user }: { user: User }) {
             Search
             <input
               type="search"
-              placeholder="Reason, name, notes"
+              placeholder="Reason, notes"
               value={filters.q}
               onChange={(e) => setFilters({ ...filters, q: e.target.value })}
             />
+          </label>
+          <label>
+            Bank account
+            <select
+              value={filters.account}
+              onChange={(e) =>
+                setFilters({
+                  ...filters,
+                  account: e.target.value as Filters["account"],
+                })
+              }
+            >
+              <option value="all">All accounts</option>
+              {accounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Type
+            <select
+              value={filters.type}
+              onChange={(e) =>
+                setFilters({ ...filters, type: e.target.value as Filters["type"] })
+              }
+            >
+              <option value="">All</option>
+              <option value="income">Income</option>
+              <option value="expense">Expense</option>
+            </select>
           </label>
           <label>
             Category
@@ -310,131 +638,130 @@ export function Tracker({ user }: { user: User }) {
               onChange={(e) => setFilters({ ...filters, category: e.target.value })}
             >
               <option value="">All</option>
-              {CATEGORIES.map((category) => (
+              {categories.map((category) => (
                 <option key={category} value={category}>
                   {category}
                 </option>
               ))}
             </select>
           </label>
-          <label>
-            Paid by
-            <select
-              value={filters.paidBy}
-              onChange={(e) => setFilters({ ...filters, paidBy: e.target.value })}
-            >
-              <option value="">Anyone</option>
-              {people.map((person) => (
-                <option key={person} value={person}>
-                  {person}
-                </option>
-              ))}
-            </select>
-          </label>
         </div>
-      </section>
-
-      <section className="split-grid">
-        <article className="panel">
-          <h2>By category</h2>
-          {categoryTotals.length === 0 ? (
-            <p className="empty">Nothing in this view.</p>
-          ) : (
-            <ul className="bars">
-              {categoryTotals.map((row) => (
-                <li key={row.label}>
-                  <span>{row.label}</span>
-                  <strong>{formatINR(row.total)}</strong>
-                </li>
-              ))}
-            </ul>
-          )}
-        </article>
-        <article className="panel">
-          <h2>By person</h2>
-          {personTotals.length === 0 ? (
-            <p className="empty">Nothing in this view.</p>
-          ) : (
-            <ul className="bars">
-              {personTotals.map((row) => (
-                <li key={row.label}>
-                  <span>{row.label}</span>
-                  <strong>{formatINR(row.total)}</strong>
-                </li>
-              ))}
-            </ul>
-          )}
-        </article>
       </section>
 
       <section className="panel">
-        <div className="panel-head">
-          <h2>Expenses</h2>
-        </div>
+        <h2>Ledger</h2>
         {loading ? (
           <p className="empty">Loading…</p>
         ) : filtered.length === 0 ? (
-          <p className="empty">
-            No expenses in this view. Tap Add expense, or pick another month.
-          </p>
+          <p className="empty">No records in this view.</p>
         ) : (
-          <div className="table-wrap">
-            <table className="expense-table">
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Reason</th>
-                  <th>Category</th>
-                  <th>Paid by</th>
-                  <th className="num">Amount</th>
-                  <th>Notes</th>
-                  <th> </th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((expense) => (
-                  <tr key={expense.id}>
-                    <td>
-                      <time dateTime={expense.date}>
-                        {formatDisplayDate(expense.date)}
-                      </time>
-                    </td>
-                    <td>{expense.reason}</td>
-                    <td>{expense.category}</td>
-                    <td>{expense.paid_by}</td>
-                    <td className="num">{formatINR(expense.amount)}</td>
-                    <td>{expense.notes ?? ""}</td>
-                    <td className="table-actions">
-                      <button type="button" onClick={() => setSheet(expense)}>
-                        Edit
-                      </button>
-                      <button type="button" onClick={() => onDelete(expense.id)}>
-                        Delete
-                      </button>
-                    </td>
+          <>
+            <ul className="ledger-cards">
+              {filtered.map((entry) => {
+                const edited = entry.updated_at !== entry.created_at;
+                return (
+                  <li key={entry.id} className="ledger-card">
+                    <div className="ledger-card-head">
+                      <time dateTime={entry.date}>{formatDisplayDate(entry.date)}</time>
+                      <strong className="num">{formatINR(entry.amount)}</strong>
+                    </div>
+                    <p className="ledger-card-reason">{entry.reason}</p>
+                    <p className="ledger-card-meta">
+                      <span className={entry.type}>{entry.type}</span>
+                      {" · "}
+                      {accountNames.get(entry.bank_account_id) ?? "—"}
+                      {" · "}
+                      {entry.category}
+                    </p>
+                    <p className="ledger-card-audit">
+                      Added by {displayName(entry.created_by, profiles)} ·{" "}
+                      {formatDisplayDateTime(entry.created_at)}
+                      {edited
+                        ? ` · Edited by ${displayName(entry.updated_by, profiles)} · ${formatDisplayDateTime(entry.updated_at)}`
+                        : null}
+                    </p>
+                    {entryActions(entry)}
+                    {historyId === entry.id ? historyBlock(entry.id) : null}
+                  </li>
+                );
+              })}
+            </ul>
+            <div className="table-wrap ledger-table">
+              <table className="expense-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Account</th>
+                    <th>Type</th>
+                    <th>Reason</th>
+                    <th>Category</th>
+                    <th className="num">Amount</th>
+                    <th>Added by</th>
+                    <th>Added at</th>
+                    <th>Edited by</th>
+                    <th>Edited at</th>
+                    <th> </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {filtered.map((entry) => {
+                    const edited = entry.updated_at !== entry.created_at;
+                    return (
+                      <tr key={entry.id}>
+                        <td>
+                          <time dateTime={entry.date}>{formatDisplayDate(entry.date)}</time>
+                        </td>
+                        <td>{accountNames.get(entry.bank_account_id) ?? "—"}</td>
+                        <td className={entry.type}>{entry.type}</td>
+                        <td>{entry.reason}</td>
+                        <td>{entry.category}</td>
+                        <td className="num">{formatINR(entry.amount)}</td>
+                        <td>{displayName(entry.created_by, profiles)}</td>
+                        <td>{formatDisplayDateTime(entry.created_at)}</td>
+                        <td>{edited ? displayName(entry.updated_by, profiles) : "—"}</td>
+                        <td>{edited ? formatDisplayDateTime(entry.updated_at) : "—"}</td>
+                        <td>{entryActions(entry)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {historyId && (
+              <div className="hide-on-mobile">{historyBlock(historyId)}</div>
+            )}
+          </>
         )}
       </section>
 
-      {sheet === null && (
-        <button
-          type="button"
-          className="fab"
-          onClick={() => setSheet("new")}
-        >
-          Add expense
-        </button>
+      {sheet === null && accountSheet === null && (
+        <div className="fab-row">
+          <button type="button" className="fab secondary" onClick={() => startAdd("income")}>
+            Add income
+          </button>
+          <button type="button" className="fab" onClick={() => startAdd("expense")}>
+            Add expense
+          </button>
+        </div>
       )}
 
       {sheet !== null && (
-        <ExpenseScreen
+        <EntryScreen
           user={user}
-          expense={sheet === "new" ? null : sheet}
+          profile={profile}
+          companyId={companyId}
+          accounts={accounts}
+          entry={sheet.mode === "edit" ? sheet.entry : null}
+          defaultType={sheet.mode === "new" ? sheet.type : sheet.entry.type}
           onClose={() => setSheet(null)}
+          onSaved={load}
+        />
+      )}
+      {accountSheet !== null && (
+        <BankAccountForm
+          companyId={companyId}
+          account={accountSheet === "new" ? null : accountSheet}
+          onClose={() => setAccountSheet(null)}
           onSaved={load}
         />
       )}

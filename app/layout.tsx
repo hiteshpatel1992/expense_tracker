@@ -13,14 +13,14 @@ const sans = Source_Sans_3({
 });
 
 export const metadata: Metadata = {
-  title: "Expenses",
-  description: "Shared household expense tracker",
-  applicationName: "Expenses",
+  title: "P&L tracker",
+  description: "Multi-company profit and loss tracker",
+  applicationName: "P&L tracker",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "Expenses",
+    title: "P&L",
   },
   icons: {
     icon: [
