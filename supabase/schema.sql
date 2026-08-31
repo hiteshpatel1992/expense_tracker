@@ -48,6 +48,8 @@ create policy "authenticated delete"
 
 grant select, insert, update, delete on public.expenses to authenticated;
 
+notify pgrst, 'reload schema';
+
 -- Live updates when someone else adds a row (optional; skip if already added).
 do $$
 begin
